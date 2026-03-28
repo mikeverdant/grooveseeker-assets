@@ -5,7 +5,7 @@ const CFG={
   PAGE_SIZE:20,
   BATCH_SIZE:6,
   PAC_URL:"https://gsv3.ai/pacman/",
-  EVENTS_CSV_URL:"https://huggingface.co/datasets/verdantdavid/gsv3_upcoming_events/resolve/main/gsv3_upcoming_events.csv?download=1"
+  EVENTS_CSV_URL:"https://huggingface.co/datasets/verdantdavid/gsv3_upcoming_events/resolve/main/gsv3_upcoming_events.csv"
 };
 
 const CATS=[
@@ -244,10 +244,18 @@ const loadEvs=async()=>{
   let csv="";
   try{
     const url=CFG.EVENTS_CSV_URL+(CFG.EVENTS_CSV_URL.includes("?")?"&":"?")+"_="+Date.now();
-    const res=await fetch(url,{cache:"no-store"});if(!res.ok)throw new Error("HTTP "+res.status);csv=await res.text();
-  }catch{setMsg("Couldn't load events. Try refreshing.");setSt("Connection issue");return;}
-  let rows;try{rows=parseCSV(csv);}catch{setMsg("Feed error. Try again.");setSt("Error");return;}
-  if(!rows||rows.length<2){setMsg("No events yet. Check back soon.");setSt("No events");return;}
+    const res=await fetch(url,{cache:"no-store",mode:"cors"});
+    if(!res.ok)throw new Error("HTTP "+res.status);
+    csv=await res.text();
+  }catch(err){
+    setMsg("Couldn't load events ("+err.message+"). Try refreshing.");
+    setSt("Connection issue: "+err.message);
+    return;
+  }
+  if(!csv||csv.trim().length<10){setMsg("Events feed returned empty data.");setSt("Empty feed");return;}
+  let rows;
+  try{rows=parseCSV(csv);}catch(err){setMsg("Feed parse error: "+err.message);setSt("Parse error");return;}
+  if(!rows||rows.length<2){setMsg("No events in feed yet. Check back soon.");setSt("No events");return;}
   const I=mapHeaders(rows[0]);
   allEvs=rows.slice(1).map(r=>parseRow(r,I)).filter(ev=>ev.d||ev.e||ev.nFull||ev.u);
   renderFeatured(allEvs);applyFilters();
