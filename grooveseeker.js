@@ -244,12 +244,16 @@ const loadEvs=async()=>{
   let csv="";
   try{
     const url=CFG.EVENTS_CSV_URL+(CFG.EVENTS_CSV_URL.includes("?")?"&":"?")+"_="+Date.now();
-    const res=await fetch(url,{cache:"no-store",mode:"cors"});
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),8000);
+    const res=await fetch(url,{cache:"no-store",mode:"cors",signal:controller.signal});
+    clearTimeout(timer);
     if(!res.ok)throw new Error("HTTP "+res.status);
     csv=await res.text();
   }catch(err){
-    setMsg("Couldn't load events ("+err.message+"). Try refreshing.");
-    setSt("Connection issue: "+err.message);
+    const msg=err.name==="AbortError"?"Request timed out after 8 seconds":err.message;
+    setMsg("Could not load events: "+msg);
+    setSt("Error: "+msg);
     return;
   }
   if(!csv||csv.trim().length<10){setMsg("Events feed returned empty data.");setSt("Empty feed");return;}
