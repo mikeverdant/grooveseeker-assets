@@ -13,15 +13,7 @@
     u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`
   ];
 
-  // Exact sheet dropdown values mapped to internal keys
-  const CAT_MAP = {
-    'eats':         'eats',
-    'entertainment':'entertainment',
-    'shop':         'shop',
-    'arts':         'arts',
-    'weird & fun!': 'weird'
-  };
-
+  // ── CSV parser -- handles multiline quoted fields ──────────────────
   function parseCSV(text) {
     const rows = [];
     let col = '', inQ = false, row = [];
@@ -50,12 +42,14 @@
     }).filter(r => r.name && r.name.trim().length > 0);
   }
 
+  // ── Clean URL ──────────────────────────────────────────────────────
   function cleanUrl(raw) {
     if (!raw) return '';
     const s = raw.replace(/[.,\s]+$/, '').trim();
     return s.match(/^https?:\/\//) ? s : 'https://' + s;
   }
 
+  // ── Logo ───────────────────────────────────────────────────────────
   function logoUrl(r) {
     if (r.logo_url && r.logo_url.trim()) return r.logo_url.trim();
     try {
@@ -64,10 +58,11 @@
     } catch { return ''; }
   }
 
+  // ── Fetch HTML through proxy chain ────────────────────────────────
   async function fetchHtml(url) {
     for (const proxy of PROXIES) {
       try {
-        const res = await fetch(proxy(url));
+        const res  = await fetch(proxy(url));
         if (!res.ok) continue;
         const data = await res.json();
         const html = data.contents || (typeof data === 'string' ? data : '');
@@ -85,33 +80,45 @@
     return m ? m[1].trim().substring(0, 160) : '';
   }
 
+  // ── Enrich: description + geocode ─────────────────────────────────
   async function enrich(venue) {
-    // Description
+    // Description via proxy chain
     try {
       const html = await fetchHtml(venue.url);
       if (html) venue._desc = extractDesc(html);
     } catch {}
-    // Geocode
+
+    // Geocode -- store lat, lng AND a clean address string
     try {
-      const q = encodeURIComponent(venue.name + ' San Francisco CA');
-      const res = await fetch('https://nominatim.openstreetmap.org/search?format=json&q=' + q + '&limit=1',
-        { headers: { 'Accept-Language': 'en' } });
+      const q   = encodeURIComponent(venue.name + ' San Francisco CA');
+      const res = await fetch(
+        'https://nominatim.openstreetmap.org/search?format=json&q=' + q + '&limit=1&addressdetails=1',
+        { headers: { 'Accept-Language': 'en' } }
+      );
       const data = await res.json();
-      if (data.length) { venue._lat = parseFloat(data[0].lat); venue._lng = parseFloat(data[0].lon); }
+      if (data.length) {
+        venue._lat  = parseFloat(data[0].lat);
+        venue._lng  = parseFloat(data[0].lon);
+        // Build a clean short address: house_number + road + city
+        const a = data[0].address || {};
+        const parts = [
+          (a.house_number ? a.house_number + ' ' : '') + (a.road || ''),
+          a.city || a.town || a.village || 'San Francisco'
+        ].filter(Boolean);
+        venue._address = parts.join(', ');
+      }
     } catch {}
   }
 
-  function normaliseCategory(raw) {
-    return CAT_MAP[(raw||'').toLowerCase().trim()] || 'other';
-  }
-
+  // ── Main ──────────────────────────────────────────────────────────
   async function init() {
     window.GSPromosReady = false;
     window.GSPromos = [];
     try {
-      const res = await fetch(SHEET_URL);
+      const res  = await fetch(SHEET_URL);
       const text = await res.text();
       const rows = parseCSV(text);
+
       const venues = rows.map(r => ({
         name:             r.name,
         url:              cleanUrl(r.url),
@@ -120,16 +127,20 @@
         deal_3:           r.deal_3           || '',
         deal_description: r.deal_description || '',
         logo:             logoUrl(r),
-        category:         normaliseCategory(r.category),
-        _desc: '', _lat: null, _lng: null
+        // Pass category exactly as typed in sheet -- no translation
+        category:         (r.category || '').trim(),
+        _desc:    '',
+        _address: '',
+        _lat:     null,
+        _lng:     null,
       }));
 
-      // First pass -- render with sheet data immediately
-      window.GSPromos = venues;
+      // First pass -- render immediately
+      window.GSPromos      = venues;
       window.GSPromosReady = true;
       if (typeof window.GSPromosCallback === 'function') window.GSPromosCallback(venues);
 
-      // Enrich in background, re-render when done
+      // Enrich in background, re-render when complete
       await Promise.all(venues.map(enrich));
       if (typeof window.GSPromosCallback === 'function') window.GSPromosCallback(venues);
 
