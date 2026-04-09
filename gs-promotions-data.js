@@ -7,11 +7,7 @@
 
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRaSiUQPUQggMlzKNtVgoKZbK2KQRH10F5CodNY1zdJxdAuDdY6MWy-Xdgap7VA-hqQ571QvHOcwpOL/pub?output=csv';
 
-  const PROXIES = [
-    u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`
-  ];
+  // No proxies needed -- using direct CORS-enabled APIs
 
   // ── CSV parser -- handles multiline quoted fields ──────────────────
   function parseCSV(text) {
@@ -58,56 +54,62 @@
     } catch { return ''; }
   }
 
-  // ── Fetch HTML through proxy chain ────────────────────────────────
-  async function fetchHtml(url) {
-    for (const proxy of PROXIES) {
-      try {
-        const res  = await fetch(proxy(url));
-        if (!res.ok) continue;
-        const data = await res.json();
-        const html = data.contents || (typeof data === 'string' ? data : '');
-        if (html && html.length > 200) return html;
-      } catch { /* try next */ }
-    }
-    return '';
-  }
-
-  function extractDesc(html) {
-    const m = html.match(/property=["']og:description["'][^>]*content=["']([^"']{10,})/i)
-           || html.match(/content=["']([^"']{10,})["'][^>]*property=["']og:description/i)
-           || html.match(/name=["']description["'][^>]*content=["']([^"']{10,})/i)
-           || html.match(/content=["']([^"']{10,})["'][^>]*name=["']description/i);
-    return m ? m[1].trim().substring(0, 160) : '';
-  }
-
-  // ── Enrich: description + geocode ─────────────────────────────────
-  async function enrich(venue) {
-    // Description via proxy chain
+  // ── Fetch description via Clearbit autocomplete (CORS-enabled, no key) ──
+  async function fetchDescription(venue) {
     try {
-      const html = await fetchHtml(venue.url);
-      if (html) venue._desc = extractDesc(html);
-    } catch {}
+      const domain = new URL(venue.url).hostname.replace('www.', '');
+      // First try domain lookup
+      const res  = await fetch(
+        'https://autocomplete.clearbit.com/v1/companies/suggest?query=' + encodeURIComponent(domain),
+        { headers: { 'Accept': 'application/json' } }
+      );
+      const data = await res.json();
+      if (data && data.length > 0) {
+        // Find best match by domain
+        const match = data.find(c => c.domain && c.domain.includes(domain)) || data[0];
+        if (match.description && match.description.length > 10) {
+          venue._desc = match.description.substring(0, 160);
+          return;
+        }
+      }
+      // Fallback: try venue name search
+      const res2  = await fetch(
+        'https://autocomplete.clearbit.com/v1/companies/suggest?query=' + encodeURIComponent(venue.name),
+        { headers: { 'Accept': 'application/json' } }
+      );
+      const data2 = await res2.json();
+      if (data2 && data2.length > 0) {
+        const match2 = data2.find(c => c.domain && c.domain.includes(domain)) || null;
+        if (match2 && match2.description && match2.description.length > 10) {
+          venue._desc = match2.description.substring(0, 160);
+        }
+      }
+    } catch { /* silent -- card renders without description */ }
+  }
 
-    // Geocode -- store lat, lng AND a clean address string
+  // ── Geocode via Nominatim (direct, CORS-enabled) ──────────────────
+  async function geocodeVenue(venue) {
     try {
       const q   = encodeURIComponent(venue.name + ' San Francisco CA');
       const res = await fetch(
         'https://nominatim.openstreetmap.org/search?format=json&q=' + q + '&limit=1&addressdetails=1',
-        { headers: { 'Accept-Language': 'en' } }
+        { headers: { 'Accept-Language': 'en', 'User-Agent': 'GrooveSeeker/1.0' } }
       );
       const data = await res.json();
-      if (data.length) {
-        venue._lat  = parseFloat(data[0].lat);
-        venue._lng  = parseFloat(data[0].lon);
-        // Build a clean short address: house_number + road + city
-        const a = data[0].address || {};
-        const parts = [
-          (a.house_number ? a.house_number + ' ' : '') + (a.road || ''),
-          a.city || a.town || a.village || 'San Francisco'
-        ].filter(Boolean);
-        venue._address = parts.join(', ');
+      if (data && data.length > 0) {
+        venue._lat = parseFloat(data[0].lat);
+        venue._lng = parseFloat(data[0].lon);
+        const a    = data[0].address || {};
+        const street = [(a.house_number || ''), (a.road || '')].filter(Boolean).join(' ');
+        const city   = a.city || a.town || a.village || 'San Francisco';
+        venue._address = [street, city].filter(Boolean).join(', ');
       }
-    } catch {}
+    } catch { /* no coords -- geo filter skips this venue */ }
+  }
+
+  // ── Enrich both ───────────────────────────────────────────────────
+  async function enrich(venue) {
+    await Promise.all([fetchDescription(venue), geocodeVenue(venue)]);
   }
 
   // ── Main ──────────────────────────────────────────────────────────
@@ -139,17 +141,14 @@
       window.GSPromosReady = true;
       if (typeof window.GSPromosCallback === 'function') window.GSPromosCallback(venues);
 
-      // Enrich in background -- re-render only if something actually populated
+      // Enrich in background -- always re-render when done
       try {
         await Promise.all(venues.map(enrich));
-        const anyEnriched = venues.some(v => v._desc || v._address);
-        if (anyEnriched && typeof window.GSPromosCallback === 'function') {
-          window.GSPromosCallback(venues);
-        }
       } catch(enrichErr) {
-        console.warn('[GSPromos] Enrichment partial failure:', enrichErr);
-        // Cards already rendered from sheet data -- no action needed
+        console.warn('[GSPromos] Enrichment error:', enrichErr);
       }
+      // Re-render regardless -- picks up any desc/address that populated
+      if (typeof window.GSPromosCallback === 'function') window.GSPromosCallback(venues);
 
     } catch (e) {
       console.warn('[GSPromos] Load failed:', e);
