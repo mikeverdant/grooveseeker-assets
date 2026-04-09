@@ -8,9 +8,9 @@
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRaSiUQPUQggMlzKNtVgoKZbK2KQRH10F5CodNY1zdJxdAuDdY6MWy-Xdgap7VA-hqQ571QvHOcwpOL/pub?output=csv';
 
   const PROXIES = [
-    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
     u => `https://corsproxy.io/?${encodeURIComponent(u)}`,
-    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`
+    u => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    u => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`
   ];
 
   // ── CSV parser -- handles multiline quoted fields ──────────────────
@@ -127,7 +127,6 @@
         deal_3:           r.deal_3           || '',
         deal_description: r.deal_description || '',
         logo:             logoUrl(r),
-        // Pass category exactly as typed in sheet -- no translation
         category:         (r.category || '').trim(),
         _desc:    '',
         _address: '',
@@ -135,14 +134,22 @@
         _lng:     null,
       }));
 
-      // First pass -- render immediately
+      // Set immediately -- cards render from sheet data right away
       window.GSPromos      = venues;
       window.GSPromosReady = true;
       if (typeof window.GSPromosCallback === 'function') window.GSPromosCallback(venues);
 
-      // Enrich in background, re-render when complete
-      await Promise.all(venues.map(enrich));
-      if (typeof window.GSPromosCallback === 'function') window.GSPromosCallback(venues);
+      // Enrich in background -- re-render only if something actually populated
+      try {
+        await Promise.all(venues.map(enrich));
+        const anyEnriched = venues.some(v => v._desc || v._address);
+        if (anyEnriched && typeof window.GSPromosCallback === 'function') {
+          window.GSPromosCallback(venues);
+        }
+      } catch(enrichErr) {
+        console.warn('[GSPromos] Enrichment partial failure:', enrichErr);
+        // Cards already rendered from sheet data -- no action needed
+      }
 
     } catch (e) {
       console.warn('[GSPromos] Load failed:', e);
